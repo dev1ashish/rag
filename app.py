@@ -52,23 +52,6 @@ def process_file(file, api_key: str) -> Optional[Dict[str, Any]]:
     if not file:
         return None
         
-    # Get file extension and processor type
-    file_extension = os.path.splitext(file.name)[1].lower()
-    processor_type = {
-        '.xlsx': 'excel',
-        '.xls': 'excel',
-        '.pdf': 'pdf',
-        '.mp3': 'audio',
-        '.wav': 'audio',
-        '.png': 'image',
-        '.jpg': 'image',
-        '.jpeg': 'image'
-    }.get(file_extension)
-    
-    if not processor_type:
-        st.error(f"Unsupported file type: {file_extension}")
-        return None
-    
     try:
         # Create temporary directory
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -79,34 +62,49 @@ def process_file(file, api_key: str) -> Optional[Dict[str, Any]]:
             status_text.text("Creating temporary file...")
             progress_bar.progress(20)
             
-            temp_file_path = os.path.join(temp_dir, file.name)
-            
             # Save uploaded file
+            temp_file_path = os.path.join(temp_dir, file.name)
             with open(temp_file_path, 'wb') as f:
                 f.write(file.getvalue())
             
             status_text.text("Initializing processor...")
             progress_bar.progress(40)
             
-            # Get appropriate processor and process file
-            processor = get_processor(processor_type, api_key)
+            # Get file extension for processor type
+            file_extension = os.path.splitext(file.name)[1].lower()
+            
+            # Get appropriate processor
+            try:
+                processor = get_processor(file_extension, api_key)
+            except ValueError as ve:
+                st.error(str(ve))
+                return None
+            
             if not processor:
                 st.error("Could not initialize processor")
                 return None
             
-            status_text.text(f"Processing {processor_type}...")
+            status_text.text(f"Processing document...")
             progress_bar.progress(60)
             
-            result = processor.process(temp_file_path)
-            
-            status_text.text("Finalizing...")
-            progress_bar.progress(100)
-            
-            # Clean up
-            status_text.empty()
-            progress_bar.empty()
-            
-            return result
+            try:
+                result = processor.process(temp_file_path)
+                if result['metadata'][0].get('type') == 'error':
+                    st.error(result['metadata'][0].get('error', 'Unknown error processing file'))
+                    return None
+                
+                status_text.text("Finalizing...")
+                progress_bar.progress(100)
+                
+                return result
+                
+            except ValueError as ve:
+                st.error(str(ve))
+                return None
+            finally:
+                # Clean up
+                status_text.empty()
+                progress_bar.empty()
             
     except Exception as e:
         st.error(f"Error processing file: {str(e)}")
@@ -114,7 +112,7 @@ def process_file(file, api_key: str) -> Optional[Dict[str, Any]]:
 
 def main():
     st.set_page_config(page_title="Document Chat", layout="wide")
-    st.title("Proof of concept")
+    st.title("Document Chat Assistant")
     
     initialize_session_state()
     
@@ -137,8 +135,9 @@ def main():
     with col1:
         # File upload
         uploaded_file = st.file_uploader(
-            "Upload a document (PDF, Excel, Audio, or Image file)",
-            type=["pdf", "xlsx", "xls", "mp3", "wav", "png", "jpg", "jpeg"]
+            "Upload a document (PDF, Excel, Office, Audio, or Image file)",
+            type=["pdf", "xlsx", "xls", "mp3", "wav", "png", "jpg", "jpeg",
+                "docx", "doc"]
         )
         
         if uploaded_file:

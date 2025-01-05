@@ -7,6 +7,10 @@ from PIL import Image
 import base64
 import requests
 from bs4 import BeautifulSoup
+import io
+from pathlib import Path
+from pptx import Presentation
+from docx import Document
 
 class DocumentProcessor:
     """Base class for document processors"""
@@ -126,7 +130,6 @@ class ImageProcessor(DocumentProcessor):
             image.thumbnail(max_size, Image.Resampling.LANCZOS)
             
             # Prepare image for API
-            import io
             buffered = io.BytesIO()
             image.save(buffered, format=image.format if image.format else "JPEG")
             img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -135,7 +138,7 @@ class ImageProcessor(DocumentProcessor):
             print(f"Attempting to process image: {os.path.basename(file_path)}")
             
             response = openai.ChatCompletion.create(
-                model="gpt-4o",  # Updated model name
+                model="gpt-4-vision-preview",
                 messages=[
                     {
                         "role": "user",
@@ -217,21 +220,161 @@ class WebProcessor(DocumentProcessor):
                 'metadata': [{'source': str(url), 'type': 'error'}]
             }
 
+class OfficeProcessor(DocumentProcessor):
+    def process(self, file_path: str) -> Dict[str, List[Any]]:
+        """Process Office document and return extracted text with metadata"""
+        try:
+            ext = Path(file_path).suffix.lower()
+            
+            if ext in ['.pptx', '.ppt']:
+                return self._process_presentation(file_path)
+            elif ext in ['.docx', '.doc']:
+                return self._process_document(file_path)
+            else:
+                raise ValueError(f"Unsupported file type: {ext}")
+                
+        except Exception as e:
+            print(f"Error processing office document: {str(e)}")
+            return {
+                'texts': ['Error processing office document'],
+                'metadata': [{
+                    'source': str(file_path),
+                    'type': 'error',
+                    'error': str(e)
+                }]
+            }
+
+    def _process_presentation(self, file_path: str) -> Dict[str, List[Any]]:
+        """Process PPTX files"""
+        try:
+            prs = Presentation(file_path)
+            all_content = []
+            
+            for slide_num, slide in enumerate(prs.slides, 1):
+                slide_content = []
+                slide_content.append(f"[Slide {slide_num}]")
+                
+                if slide.shapes.title:
+                    slide_content.append(f"Title: {slide.shapes.title.text}")
+                
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        slide_content.append(shape.text.strip())
+                    
+                    if shape.has_table:
+                        table_content = []
+                        for row in shape.table.rows:
+                            row_text = " | ".join(
+                                cell.text.strip() for cell in row.cells
+                            )
+                            if row_text.strip():
+                                table_content.append(row_text)
+                        if table_content:
+                            slide_content.append(
+                                "Table content:\n" + "\n".join(table_content)
+                            )
+                
+                all_content.append("\n".join(slide_content))
+            
+            return {
+                'texts': all_content,
+                'metadata': [{
+                    'source': str(file_path),
+                    'type': 'presentation',
+                    'total_slides': len(prs.slides)
+                }]
+            }
+        except Exception as e:
+            if 'not a PowerPoint file' in str(e):
+                raise ValueError("This appears to be an unsupported PowerPoint format. Please convert to .pptx format.")
+            raise
+
+    def _process_document(self, file_path: str) -> Dict[str, List[Any]]:
+        """Process DOCX files"""
+        try:
+            doc = Document(file_path)
+            all_content = []
+            section_content = []
+            
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    section_content.append(para.text.strip())
+                
+                if len("\n".join(section_content)) > 1000:
+                    all_content.append("\n".join(section_content))
+                    section_content = []
+            
+            for table in doc.tables:
+                table_content = []
+                for row in table.rows:
+                    row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                    if row_text.strip():
+                        table_content.append(row_text)
+                if table_content:
+                    section_content.append(
+                        "Table content:\n" + "\n".join(table_content)
+                    )
+                    
+                if len("\n".join(section_content)) > 1000:
+                    all_content.append("\n".join(section_content))
+                    section_content = []
+            
+            if section_content:
+                all_content.append("\n".join(section_content))
+            
+            return {
+                'texts': all_content,
+                'metadata': [{
+                    'source': str(file_path),
+                    'type': 'document',
+                    'total_paragraphs': len(doc.paragraphs),
+                    'total_tables': len(doc.tables)
+                }]
+            }
+        except Exception as e:
+            if 'not a Word file' in str(e):
+                raise ValueError("This appears to be an unsupported Word format. Please convert to .docx format.")
+            raise
+
 def get_processor(file_type: str, api_key: Optional[str] = None) -> DocumentProcessor:
     """Factory function to get appropriate processor"""
+    # First, map file extensions to processor types
+    processor_mapping = {
+        '.xlsx': 'excel',
+        '.xls': 'excel',
+        '.pdf': 'pdf',
+        '.mp3': 'audio',
+        '.wav': 'audio',
+        '.png': 'image',
+        '.jpg': 'image',
+        '.jpeg': 'image',
+        '.pptx': 'office',
+        '.ppt': 'office',
+        '.docx': 'office',
+        '.doc': 'office'
+    }
+    
+    # Get the processor type based on extension or direct type
+    if file_type.startswith('.'):
+        processor_type = processor_mapping.get(file_type.lower())
+    else:
+        # If it's a direct type (like 'office', 'pdf', etc.)
+        processor_type = file_type if file_type in {'excel', 'pdf', 'audio', 'image', 'web', 'office'} else None
+    
+    # Map processor types to their factories
     processors = {
         'excel': lambda: ExcelProcessor(),
         'pdf': lambda: PDFProcessor(),
         'audio': lambda: AudioProcessor(api_key),
         'image': lambda: ImageProcessor(api_key),
-        'web': lambda: WebProcessor()
+        'web': lambda: WebProcessor(),
+        'office': lambda: OfficeProcessor()
     }
     
-    processor_factory = processors.get(file_type)
-    if processor_factory is None:
+    if processor_type is None:
         raise ValueError(f"Unsupported file type: {file_type}")
         
-    if file_type in ['audio', 'image'] and api_key is None:
-        raise ValueError(f"API key required for {file_type} processing")
+    if processor_type in ['audio', 'image'] and api_key is None:
+        raise ValueError(f"API key required for {processor_type} processing")
     
-    return processor_factory()
+    return processors[processor_type]()

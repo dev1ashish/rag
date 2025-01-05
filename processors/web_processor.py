@@ -14,7 +14,7 @@ class WebProcessor(DocumentProcessor):
     def __init__(self):
         self.cache_dir = ".web_cache"
         os.makedirs(self.cache_dir, exist_ok=True)
-        self.session = requests.Session()  # Reuse session for better performance
+        self.session = requests.Session()  # Reuse session
         
     def _get_cache_path(self, url: str) -> str:
         """Generate cache file path for URL."""
@@ -72,7 +72,7 @@ class WebProcessor(DocumentProcessor):
             loop.close()
 
             # Parse HTML
-            soup = BeautifulSoup(html_content, 'lxml')  # Using lxml for faster parsing
+            soup = BeautifulSoup(html_content, 'lxml')  # Using lxml for faster parsing, baki to ho na rahi
             
             # Process content in parallel
             with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -86,7 +86,7 @@ class WebProcessor(DocumentProcessor):
                 title = title_future.result()
                 content = content_future.result()
 
-            # Clean text
+            # shiny clean text
             cleaned_text = self._clean_text(content)
 
             # Cache the results
