@@ -8,31 +8,51 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from pathlib import Path
 import numpy as np
-
 class DataVisualizationManager:
     """Manages data visualization with enhanced Excel support"""
     
     def __init__(self):
+        self.current_df = None
+        self.current_file = None
         self.dataframes = {}
+    
+    def load_dataframe(self, file_name: str) -> Optional[pd.DataFrame]:
+        """Load dataframe from session state"""
+        if file_name in st.session_state.dataframes:
+            self.current_df = st.session_state.dataframes[file_name]
+            self.current_file = file_name
+            self.dataframes[file_name] = self.current_df
+            return self.current_df
+        return None
     
     def get_dataframe(self, file_name: str) -> Optional[pd.DataFrame]:
         """Get dataframe from file name"""
-        if file_name not in self.dataframes:
-            try:
-                # Get the full path from session state
-                file_path = st.session_state.file_paths.get(file_name)
-                if not file_path:
-                    print(f"File path not found for {file_name}")
-                    return None
-                
-                # Read the Excel file from the correct path
-                self.dataframes[file_name] = pd.read_excel(file_path)
-                print(f"Successfully read {file_name} from {file_path}")
-                
-            except Exception as e:
-                print(f"Error reading file {file_name}: {str(e)}")
+        if file_name in self.dataframes:
+            return self.dataframes[file_name]
+            
+        if file_name in st.session_state.dataframes:
+            df = st.session_state.dataframes[file_name]
+            self.dataframes[file_name] = df
+            return df
+            
+        try:
+            file_path = st.session_state.file_paths.get(file_name)
+            if not file_path:
+                print(f"File path not found for {file_name}")
                 return None
-        return self.dataframes[file_name]
+            
+            file_extension = Path(file_path).suffix.lower()
+            if file_extension == '.csv':
+                df = pd.read_csv(file_path)
+            else:
+                df = pd.read_excel(file_path)
+                
+            self.dataframes[file_name] = df
+            return df
+            
+        except Exception as e:
+            print(f"Error reading file {file_name}: {str(e)}")
+            return None
     
     def create_visualization(self, file_name: str, plot_type: str, x_col: str, 
                            y_col: Optional[str] = None, title: str = "") -> Optional[go.Figure]:
@@ -53,10 +73,9 @@ class DataVisualizationManager:
             elif plot_type == "histogram":
                 fig = px.histogram(df, x=x_col, title=title)
             else:
-                fig = None
+                return None
                 
             return fig
-            
         except Exception as e:
             print(f"Error creating visualization: {str(e)}")
             return None

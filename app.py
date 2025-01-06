@@ -22,6 +22,7 @@ import pandas as pd
 import json
 import plotly.graph_objects as go
 from agents.prompts import EXCEL_ANALYSIS_PROMPT, VIZ_SYSTEM_PROMPT
+from pathlib import Path
 
 def initialize_session_state():
     """Initialize session state variables"""
@@ -133,8 +134,8 @@ def render_excel_analysis_tab():
     # File upload section in a container
     with st.container():
         uploaded_files = st.file_uploader(
-            "Upload Excel files to begin analysis",
-            type=["xlsx", "xls"],
+            "Upload Excel or CSV files to begin analysis",
+            type=["xlsx", "xls", "csv"],
             accept_multiple_files=True
         )
     
@@ -150,13 +151,20 @@ def render_excel_analysis_tab():
         for i, file in enumerate(uploaded_files):
             if file.name not in st.session_state.dataframes:
                 try:
-                    # Save file temporarily and store its path
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+                    # Get file extension
+                    file_extension = Path(file.name).suffix.lower()
+                    
+                    # Save file temporarily with correct extension
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
                         tmp_file.write(file.getvalue())
                         st.session_state.file_paths[file.name] = tmp_file.name
                     
-                    # Read the dataframe
-                    df = pd.read_excel(st.session_state.file_paths[file.name])
+                    # Read the dataframe based on file type
+                    if file_extension == '.csv':
+                        df = pd.read_csv(st.session_state.file_paths[file.name])
+                    else:
+                        df = pd.read_excel(st.session_state.file_paths[file.name])
+                        
                     st.session_state.dataframes[file.name] = df
                     
                     # Update progress
@@ -208,40 +216,45 @@ def render_excel_analysis_tab():
             
             # Visualization Tab
             with tab2:
-                st.subheader("Create Visualizations")
-                col1, col2 = st.columns([1, 2])
+                st.subheader("Data Visualization")
                 
-                with col1:
-                    file_name = st.selectbox("Select file", selected_files)
+                if selected_files:
+                    file_name = st.selectbox("Select file to visualize", selected_files)
+                    
                     if file_name:
-                        df = st.session_state.dataframes[file_name]
-                        plot_type = st.selectbox("Plot Type", ["bar", "line", "scatter", "pie", "histogram"])
-                        cols = df.columns.tolist()
-                        x_col = st.selectbox("X-axis", cols)
-                        if plot_type != "histogram":
-                            y_col = st.selectbox("Y-axis", cols)
-                        else:
-                            y_col = None
-                
-                with col2:
-                    if st.button("Generate Plot"):
-                        with st.spinner("Creating visualization..."):
-                            try:
-                                # Create figure directly using plotly
-                                if plot_type == "bar":
-                                    fig = px.bar(df, x=x_col, y=y_col)
-                                elif plot_type == "line":
-                                    fig = px.line(df, x=x_col, y=y_col)
-                                elif plot_type == "scatter":
-                                    fig = px.scatter(df, x=x_col, y=y_col)
-                                elif plot_type == "pie":
-                                    fig = px.pie(df, names=x_col, values=y_col)
-                                else:  # histogram
-                                    fig = px.histogram(df, x=x_col)
-                                
-                                st.plotly_chart(fig, use_container_width=True)
-                            except Exception as e:
-                                st.error(f"Error creating visualization: {str(e)}")
+                        df = st.session_state.data_manager.get_dataframe(file_name)
+                        
+                        if df is not None:
+                            # Get columns for visualization
+                            columns = df.columns.tolist()
+                            
+                            # Select visualization type
+                            viz_type = st.selectbox(
+                                "Select visualization type",
+                                ["bar", "line", "scatter", "pie", "histogram"]
+                            )
+                            
+                            # Get x and y columns based on visualization type
+                            x_col = st.selectbox("Select X axis", columns)
+                            
+                            if viz_type != "histogram":
+                                y_col = st.selectbox("Select Y axis", columns)
+                            else:
+                                y_col = None
+                            
+                            # Create visualization
+                            fig = st.session_state.data_manager.create_visualization(
+                                file_name,
+                                viz_type,
+                                x_col,
+                                y_col,
+                                title=f"{viz_type.capitalize()} Chart"
+                            )
+                            
+                            if fig:
+                                st.plotly_chart(fig)
+                            else:
+                                st.error("Could not create visualization")
             
             # Smart Analysis Tab
             with tab3:

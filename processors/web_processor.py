@@ -126,7 +126,6 @@ class WebProcessor(DocumentProcessor):
                         'message': error_message
                     }]
                 }
-
     def __del__(self):
         """Cleanup method."""
         self.session.close()
