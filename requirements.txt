@@ -35,3 +35,7 @@ wheel>=0.33.0
 python-pptx==0.6.21
 python-docx==0.8.11
 plotly==5.18.0
+
+scipy==1.10.1
+seaborn==0.12.2 
+matplotlib==3.7.1       
