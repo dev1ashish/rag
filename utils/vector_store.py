@@ -1,15 +1,19 @@
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import FAISS
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import copy
+import pandas as pd
+import numpy as np
+import json
 
 class VectorStore:
     def __init__(self, api_key: str):
         self.embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         self.vector_store = None
+        self.structured_store = None
         
-        # Custom text splitters for different document types by god whyy
+        # Existing text splitters
         self.splitters = {
             'default': RecursiveCharacterTextSplitter(
                 chunk_size=1000,
@@ -46,6 +50,62 @@ class VectorStore:
         }
         return enhanced
 
+    def add_structured_data(self, df: pd.DataFrame, metadata: Dict[str, Any]):
+        """Add structured data embeddings separately from text"""
+        try:
+            # Create descriptive texts for columns
+            column_texts = []
+            column_metadata = []
+            
+            for col in df.columns:
+                # Basic column info
+                col_type = str(df[col].dtype)
+                unique_count = df[col].nunique()
+                
+                # Create descriptive text
+                desc_text = f"Column {col} contains {col_type} data with {unique_count} unique values."
+                
+                # Additional statistical information for numeric columns
+                if np.issubdtype(df[col].dtype, np.number):
+                    desc_text += f" Range: {df[col].min()} to {df[col].max()}. "
+                    desc_text += f"Mean: {df[col].mean():.2f}. "
+                    desc_text += f"Median: {df[col].median()}"
+                
+                column_texts.append(desc_text)
+                
+                # Enhanced metadata
+                col_metadata = {
+                    **metadata,
+                    'column_name': col,
+                    'column_type': col_type,
+                    'unique_values': unique_count,
+                    'is_numeric': np.issubdtype(df[col].dtype, np.number),
+                    'data_statistics': {
+                        'min': float(df[col].min()) if np.issubdtype(df[col].dtype, np.number) else None,
+                        'max': float(df[col].max()) if np.issubdtype(df[col].dtype, np.number) else None,
+                        'mean': float(df[col].mean()) if np.issubdtype(df[col].dtype, np.number) else None,
+                        'median': float(df[col].median()) if np.issubdtype(df[col].dtype, np.number) else None
+                    }
+                }
+                column_metadata.append(col_metadata)
+
+            # Store structured embeddings
+            if self.structured_store is None:
+                self.structured_store = FAISS.from_texts(
+                    texts=column_texts,
+                    embedding=self.embeddings,
+                    metadatas=column_metadata
+                )
+            else:
+                self.structured_store.add_texts(
+                    texts=column_texts,
+                    metadatas=column_metadata
+                )
+
+        except Exception as e:
+            print(f"Error adding structured data: {str(e)}")
+            raise
+
     def add_texts(self, texts: List[str], metadatas: Optional[List[Dict[str, Any]]] = None) -> None:
         """Add texts to the vector store with enhanced processing"""
         if not texts:
@@ -55,7 +115,7 @@ class VectorStore:
         all_metadatas = []
 
         for idx, text in enumerate(texts):
-            # Get document type and sahi wala splitter
+            # Get document type and appropriate splitter
             doc_type = 'default'
             if metadatas and idx < len(metadatas):
                 doc_type = metadatas[idx].get('type', 'default')
@@ -63,10 +123,9 @@ class VectorStore:
             splitter = self._get_splitter(doc_type)
             chunks = splitter.split_text(text)
 
-            # Handle metadata for chonks
+            # Handle metadata for chunks
             if metadatas and idx < len(metadatas):
                 base_metadata = metadatas[idx]
-                # Create metadata for each chonk
                 for chunk_idx, _ in enumerate(chunks):
                     chunk_metadata = self._enhance_metadata(
                         base_metadata,
@@ -75,7 +134,6 @@ class VectorStore:
                     )
                     all_metadatas.append(chunk_metadata)
             else:
-                # If no metadata, create basic metadata for each chunk, else crazy indexing error
                 for chunk_idx, _ in enumerate(chunks):
                     all_metadatas.append({
                         'chunk': {'index': chunk_idx, 'total': len(chunks)},
@@ -84,7 +142,7 @@ class VectorStore:
 
             all_chunks.extend(chunks)
 
-        # Create or update vector store gawd
+        # Create or update vector store
         if self.vector_store is None:
             self.vector_store = FAISS.from_texts(
                 texts=all_chunks,
@@ -97,21 +155,59 @@ class VectorStore:
                 metadatas=all_metadatas
             )
 
-    def similarity_search(self, query: str, k: int = 4) -> List[Dict[str, Any]]:
-        """Search for similar documents"""
-        if self.vector_store is None:
-            raise ValueError("Vector store is empty. Please add documents first.")
-            
-        docs = self.vector_store.similarity_search(query, k=k)
+    def similarity_search(self, query: str, k: int = 4, include_structured: bool = True) -> List[Dict[str, Any]]:
+        """Enhanced search that includes structured data results"""
+        results = []
         
-        # chonking
-        docs.sort(key=lambda x: (
-            x.metadata.get('source', ''),
-            x.metadata.get('chunk', {}).get('index', 0)
-        ))
+        # Search regular document store
+        if self.vector_store:
+            results.extend(self.vector_store.similarity_search(query, k=k))
         
-        return docs
+        # Search structured store if requested
+        if include_structured and self.structured_store:
+            structured_results = self.structured_store.similarity_search(query, k=k)
+            results.extend(structured_results)
+        
+        # Sort results by relevance (if score is available)
+        results.sort(
+            key=lambda x: float(x.metadata.get('score', 0)) 
+            if 'score' in x.metadata else 0,
+            reverse=True
+        )
+        
+        # Return top k results
+        return results[:k]
 
     def clear(self) -> None:
-        """Clear the vector store"""
+        """Clear both regular and structured stores"""
         self.vector_store = None
+        self.structured_store = None
+
+    def get_structured_metadata(self) -> Dict[str, Any]:
+        """Get metadata about stored structured data"""
+        if not self.structured_store:
+            return {}
+            
+        try:
+            metadata = {}
+            if hasattr(self.structured_store, 'docstore'):
+                for doc_id in self.structured_store.docstore._dict:
+                    doc = self.structured_store.docstore._dict[doc_id]
+                    if hasattr(doc, 'metadata'):
+                        source = doc.metadata.get('source', 'unknown')
+                        if source not in metadata:
+                            metadata[source] = {
+                                'columns': [],
+                                'numeric_columns': []
+                            }
+                        
+                        col_name = doc.metadata.get('column_name')
+                        if col_name:
+                            metadata[source]['columns'].append(col_name)
+                            if doc.metadata.get('is_numeric', False):
+                                metadata[source]['numeric_columns'].append(col_name)
+                                
+            return metadata
+        except Exception as e:
+            print(f"Error getting structured metadata: {str(e)}")
+            return {}

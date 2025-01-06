@@ -11,6 +11,7 @@ import io
 from pathlib import Path
 from pptx import Presentation
 from docx import Document
+from utils.data_visualization import DataVisualizationManager
 
 class DocumentProcessor:
     """Base class for document processors"""
@@ -24,27 +25,54 @@ class ExcelProcessor(DocumentProcessor):
             # Read the Excel file
             df = pd.read_excel(file_path)
             
-            # Convert to a single string representation
-            text_content = [df.to_string(index=False)]  # Single chunk approach
+            # Store DataFrame for visualization
+            DataVisualizationManager.store_dataframe(df, os.path.basename(file_path))
             
-            # Simple metadata that won't cause index issues
-            metadata = [{
+            # Create enhanced metadata
+            structured_metadata = {
                 'source': str(file_path),
-                'type': 'excel',
+                'type': 'excel_structured',
                 'total_rows': len(df),
                 'total_columns': len(df.columns),
-                'columns': ', '.join(df.columns.tolist())
-            }]
+                'columns': ', '.join(df.columns.tolist()),
+                'column_types': {str(col): str(dtype) for col, dtype in df.dtypes.items()},
+                'has_numerical_data': any(df[col].dtype.kind in 'biufc' for col in df.columns),
+                'numerical_columns': [col for col in df.columns if df[col].dtype.kind in 'biufc'],
+                'categorical_columns': [col for col in df.columns if df[col].dtype.kind not in 'biufc']
+            }
 
+            # Add basic statistics for numerical columns
+            if structured_metadata['has_numerical_data']:
+                stats = {}
+                for col in structured_metadata['numerical_columns']:
+                    try:
+                        stats[col] = {
+                            'min': float(df[col].min()),
+                            'max': float(df[col].max()),
+                            'mean': float(df[col].mean()),
+                            'median': float(df[col].median())
+                        }
+                    except Exception:
+                        continue
+                structured_metadata['numerical_stats'] = stats
+
+            # Convert to string representation for text embedding
+            text_content = [df.to_string(index=False)]
+            
             return {
                 'texts': text_content,
-                'metadata': metadata
+                'metadata': [structured_metadata],
+                'dataframe': df  # Include DataFrame in return
             }
         except Exception as e:
             print(f"Error processing Excel file: {str(e)}")
             return {
                 'texts': ['Error processing Excel file'],
-                'metadata': [{'source': str(file_path), 'type': 'error'}]
+                'metadata': [{
+                    'source': str(file_path), 
+                    'type': 'error',
+                    'error': str(e)
+                }]
             }
 
 class PDFProcessor(DocumentProcessor):
@@ -92,7 +120,6 @@ class AudioProcessor(DocumentProcessor):
                     file=audio_file
                 )
 
-            # Handle both dictionary and string responses
             text = transcript.get("text") if isinstance(transcript, dict) else str(transcript)
 
             return {
@@ -118,27 +145,22 @@ class ImageProcessor(DocumentProcessor):
     def process(self, file_path: str) -> Dict[str, List[Any]]:
         """Process image file and return description with metadata."""
         try:
-            # Open and validate image
             image = Image.open(file_path)
             
-            # Convert to RGB if necessary
             if image.mode in ('RGBA', 'P'):
                 image = image.convert('RGB')
             
-            # Resize image if too large (OpenAI has file size limits)
             max_size = (1024, 1024)
             image.thumbnail(max_size, Image.Resampling.LANCZOS)
             
-            # Prepare image for API
             buffered = io.BytesIO()
             image.save(buffered, format=image.format if image.format else "JPEG")
             img_str = base64.b64encode(buffered.getvalue()).decode()
             
-            # Log attempt to call API (without sensitive data)
             print(f"Attempting to process image: {os.path.basename(file_path)}")
             
             response = openai.ChatCompletion.create(
-                model="gpt-4-vision-preview",
+                model="gpt-4o",
                 messages=[
                     {
                         "role": "user",
@@ -194,14 +216,11 @@ class WebProcessor(DocumentProcessor):
                     'metadata': [{'source': str(url), 'type': 'error'}]
                 }
             
-            # Remove script and style elements
             for element in soup(['script', 'style', 'header', 'footer', 'nav']):
                 element.decompose()
             
-            # Extract text
             text = soup.get_text(separator='\n')
             
-            # Clean text
             lines = (line.strip() for line in text.splitlines())
             text = '\n'.join(line for line in lines if line)
             
@@ -261,12 +280,10 @@ class OfficeProcessor(DocumentProcessor):
                     if hasattr(shape, "text") and shape.text.strip():
                         slide_content.append(shape.text.strip())
                     
-                    if shape.has_table:
+                    if hasattr(shape, "has_table") and shape.has_table:
                         table_content = []
                         for row in shape.table.rows:
-                            row_text = " | ".join(
-                                cell.text.strip() for cell in row.cells
-                            )
+                            row_text = " | ".join(cell.text.strip() for cell in row.cells)
                             if row_text.strip():
                                 table_content.append(row_text)
                         if table_content:
@@ -274,7 +291,9 @@ class OfficeProcessor(DocumentProcessor):
                                 "Table content:\n" + "\n".join(table_content)
                             )
                 
-                all_content.append("\n".join(slide_content))
+                content = "\n".join(slide_content)
+                if content.strip():
+                    all_content.append(content)
             
             return {
                 'texts': all_content,
@@ -338,7 +357,6 @@ class OfficeProcessor(DocumentProcessor):
 
 def get_processor(file_type: str, api_key: Optional[str] = None) -> DocumentProcessor:
     """Factory function to get appropriate processor"""
-    # First, map file extensions to processor types
     processor_mapping = {
         '.xlsx': 'excel',
         '.xls': 'excel',
@@ -354,14 +372,17 @@ def get_processor(file_type: str, api_key: Optional[str] = None) -> DocumentProc
         '.doc': 'office'
     }
     
-    # Get the processor type based on extension or direct type
     if file_type.startswith('.'):
         processor_type = processor_mapping.get(file_type.lower())
     else:
-        # If it's a direct type (like 'office', 'pdf', etc.)
         processor_type = file_type if file_type in {'excel', 'pdf', 'audio', 'image', 'web', 'office'} else None
     
-    # Map processor types to their factories
+    if processor_type is None:
+        raise ValueError(f"Unsupported file type: {file_type}")
+        
+    if processor_type in ['audio', 'image'] and api_key is None:
+        raise ValueError(f"API key required for {processor_type} processing")
+    
     processors = {
         'excel': lambda: ExcelProcessor(),
         'pdf': lambda: PDFProcessor(),
@@ -370,11 +391,5 @@ def get_processor(file_type: str, api_key: Optional[str] = None) -> DocumentProc
         'web': lambda: WebProcessor(),
         'office': lambda: OfficeProcessor()
     }
-    
-    if processor_type is None:
-        raise ValueError(f"Unsupported file type: {file_type}")
-        
-    if processor_type in ['audio', 'image'] and api_key is None:
-        raise ValueError(f"API key required for {processor_type} processing")
     
     return processors[processor_type]()
